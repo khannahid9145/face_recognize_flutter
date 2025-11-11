@@ -117,7 +117,7 @@ double cosineSimilarity(Float32List a, Float32List b) {
   for (int i = 0; i < a.length; i++) {
     final ai = a[i], bi = b[i];
     dot += ai * bi;
-    na += ai * ai;
+    na += ai * ai;  
     nb += bi * bi;
   }
   final denom = math.sqrt(na) * math.sqrt(nb);

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
-// import 'screens/face_register.dart';
-import 'screens/face_auth_service.dart';
+import 'screens/face_register.dart';
+// import 'screens/face_auth_service.dart';
 
 List<CameraDescription> cameras = [];
 
@@ -31,7 +31,8 @@ class MyApp extends StatelessWidget {
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
       ),
-      home: const FaceAuthRegister(),
+      home: const FaceRegister(),
+      // home: const FaceAuthRegister(),
     );
   }
 }

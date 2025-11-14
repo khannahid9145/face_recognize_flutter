@@ -59,7 +59,6 @@ class _FaceAuthRegisterState extends State<FaceAuthRegister> {
     print('Initializing file...');
     super.initState();
     _initialize();
-    _initCamera();
   }
 
   Future<void> saveImage() async {
@@ -180,23 +179,6 @@ Future<void> _initialize() async {
       print('Detected ${faces.length} faces');
       if (faces.isNotEmpty) {
         print('Face bounding boxes: ');
-        // final target = faces.reduce(
-        //   (a, b) =>
-        //       a.boundingBox.width * a.boundingBox.height >
-        //               b.boundingBox.width * b.boundingBox.height
-        //           ? a
-        //           : b,
-        // );
-        // print('Target face box: ${target.boundingBox}');
-        // // decode full JPEG once (you already did earlier as `decoded`)
-        // // Make sure the bounding box is in the same coordinate space (ML Kit from file is in image space).
-        // final face112 = _cropToModelInput(decoded, target.boundingBox);
-
-        // // Get the 128-D (or whatever your model outputs) embedding
-        // final emb = _embedder.run(face112); // Float32List
-        // print('Embedding: $emb');
-        // // Example: store it or compare it
-        // await _saveEnrollment(emb); // see below
         final bytes = await f.readAsBytes();
         final decoded = img.decodeImage(bytes);
         print('Decoded: $decoded');

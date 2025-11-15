@@ -1,6 +1,5 @@
 // lib/face_first_page.dart
 import 'dart:io';
-import 'dart:typed_data';
 import 'dart:convert';
 
 import 'package:face/screens/verify_face.dart';
@@ -17,6 +16,62 @@ import 'package:flutter/foundation.dart';
 
 final _secure = const FlutterSecureStorage();
 const _userKey = 'face_template_user1';
+
+enum _PoseStep { center, left, right, up }
+
+String _poseInstructionForStep(_PoseStep step) {
+  switch (step) {
+    case _PoseStep.center:
+      return 'Look straight ahead';
+    case _PoseStep.left:
+      return 'Turn your head left';
+    case _PoseStep.right:
+      return 'Turn your head right';
+    case _PoseStep.up:
+      return 'Tilt your head up slightly';
+  }
+}
+
+class _FacePoseRingPainter extends CustomPainter {
+  _FacePoseRingPainter(this.progress);
+
+  final double progress;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = size.center(Offset.zero);
+    final radius = math.min(size.width, size.height) / 2 - 12;
+    final tickPaint = Paint()
+      ..strokeCap = StrokeCap.round
+      ..strokeWidth = 3;
+    const tickCount = 60;
+    final activeTicks = (tickCount * progress.clamp(0, 1)).round();
+
+    for (int i = 0; i < tickCount; i++) {
+      final angle = (2 * math.pi * (i / tickCount)) - math.pi / 2;
+      final start = Offset(
+        center.dx + math.cos(angle) * (radius - 12),
+        center.dy + math.sin(angle) * (radius - 12),
+      );
+      final end = Offset(
+        center.dx + math.cos(angle) * radius,
+        center.dy + math.sin(angle) * radius,
+      );
+      tickPaint.color = i < activeTicks ? Colors.greenAccent : Colors.white24;
+      canvas.drawLine(start, end, tickPaint);
+    }
+
+    final borderPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2
+      ..color = Colors.white54;
+    canvas.drawCircle(center, radius, borderPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _FacePoseRingPainter oldDelegate) =>
+      oldDelegate.progress != progress;
+}
 
 img.Image _cropToModelInput(img.Image full, Rect bb, {int size = 112}) {
   final x = bb.left.floor().clamp(0, math.max(0, full.width - 1));
@@ -50,6 +105,18 @@ class _FaceRegisterState extends State<FaceRegister> {
   FaceEmbedder? _embedder;
   Float32List? _embedding;
   Uint8List? _uprightBytes;
+  bool _streaming = false;
+  bool _processingFrame = false;
+  bool _autoCaptureInFlight = false;
+  int _poseIndex = 0;
+  double _poseProgress = 0;
+  String _poseMessage = 'Align your face inside the circle';
+  final List<_PoseStep> _poseSequence = const [
+    _PoseStep.center,
+    _PoseStep.left,
+    _PoseStep.right,
+    _PoseStep.up,
+  ];
 
   final FaceDetector _detector = FaceDetector(
     options: FaceDetectorOptions(
@@ -63,14 +130,9 @@ class _FaceRegisterState extends State<FaceRegister> {
   void initState() {
     super.initState();
     if (kDebugMode) {
-      print('FaceRegister: initState');
+      debugPrint('FaceRegister: initState');
     }
     _initialize();
-  }
-
-  Float32List _toFloat32List(dynamic v) {
-    final list = (v as List).map((e) => (e as num).toDouble()).toList();
-    return Float32List.fromList(list);
   }
 
   double cosineSimilarityInline(Float32List a, Float32List b) {
@@ -92,20 +154,20 @@ class _FaceRegisterState extends State<FaceRegister> {
     );
 
     if (kDebugMode) {
-      print('FaceRegister: _initialize (model + camera)');
+      debugPrint('FaceRegister: _initialize (model + camera)');
     }
 
     try {
       await _embedder!.load();
       if (kDebugMode) {
-        print('FaceRegister: model loaded successfully');
+        debugPrint('FaceRegister: model loaded successfully');
       }
       await Future.delayed(const Duration(milliseconds: 150));
       await _initCamera();
     } catch (e) {
       if (!mounted) return;
       if (kDebugMode) {
-        print('FaceRegister: Initialization error: $e');
+        debugPrint('FaceRegister: Initialization error: $e');
       }
       ScaffoldMessenger.of(
         context,
@@ -116,13 +178,14 @@ class _FaceRegisterState extends State<FaceRegister> {
   Future<void> _cleanUp() async {
     try {
       if (kDebugMode) {
-        print('FaceRegister: _cleanUp');
+        debugPrint('FaceRegister: _cleanUp');
       }
+      await _stopPoseGuidanceStream();
       if (_cam != null) {
         await _cam!.dispose();
         _cam = null;
         if (kDebugMode) {
-          print('FaceRegister: Camera disposed');
+          debugPrint('FaceRegister: Camera disposed');
         }
       }
 
@@ -130,14 +193,211 @@ class _FaceRegisterState extends State<FaceRegister> {
         _embedder!.close();
         _embedder = null;
         if (kDebugMode) {
-          print('FaceRegister: Embedder disposed');
+          debugPrint('FaceRegister: Embedder disposed');
         }
       }
     } catch (e) {
       if (kDebugMode) {
-        print('FaceRegister: Cleanup error: $e');
+        debugPrint('FaceRegister: Cleanup error: $e');
       }
     }
+  }
+
+  void _resetPoseTracking({bool notify = true}) {
+    if (!mounted) return;
+    if (notify) {
+      setState(() {
+        _poseIndex = 0;
+        _poseProgress = 0;
+        _poseMessage = 'Align your face inside the circle';
+      });
+    } else {
+      _poseIndex = 0;
+      _poseProgress = 0;
+      _poseMessage = 'Align your face inside the circle';
+    }
+  }
+
+  Future<void> _stopPoseGuidanceStream() async {
+    if (!_streaming || _cam == null) return;
+    try {
+      await _cam!.stopImageStream();
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('FaceRegister: stop stream error: $e');
+      }
+    } finally {
+      _streaming = false;
+      _processingFrame = false;
+    }
+  }
+
+  Future<void> _startPoseGuidanceStream() async {
+    final controller = _cam;
+    if (controller == null || _streaming) return;
+
+    try {
+      _streaming = true;
+      await controller.startImageStream((CameraImage image) async {
+        if (_processingFrame || _autoCaptureInFlight) return;
+        _processingFrame = true;
+        try {
+          final input = _cameraImageToInputImage(image, controller);
+          if (input == null) return;
+          final faces = await _detector.processImage(input);
+          if (faces.isEmpty) {
+            _resetPoseTracking();
+            return;
+          }
+          final face = faces.first;
+          if (_advancePose(face) && _poseIndex >= _poseSequence.length) {
+            await _onPoseSequenceComplete();
+          }
+        } catch (e) {
+          if (kDebugMode) {
+            debugPrint('FaceRegister: pose stream error: $e');
+          }
+        } finally {
+          _processingFrame = false;
+        }
+      });
+    } catch (e) {
+      _streaming = false;
+      if (kDebugMode) {
+        debugPrint('FaceRegister: start stream error: $e');
+      }
+    }
+  }
+
+  Future<void> _onPoseSequenceComplete() async {
+    if (_autoCaptureInFlight || _cam == null) return;
+    _autoCaptureInFlight = true;
+    await _stopPoseGuidanceStream();
+    try {
+      await _captureAndDetect();
+    } finally {
+      _autoCaptureInFlight = false;
+    }
+  }
+
+  bool _advancePose(Face face) {
+    if (_poseIndex >= _poseSequence.length) {
+      return false;
+    }
+    final yaw = face.headEulerAngleY ?? 0;
+    final pitch = face.headEulerAngleX ?? 0;
+    final step = _poseSequence[_poseIndex];
+    bool satisfied = false;
+
+    switch (step) {
+      case _PoseStep.center:
+        satisfied = yaw.abs() < 8 && pitch.abs() < 8;
+        break;
+      case _PoseStep.left:
+        satisfied = yaw < -15;
+        break;
+      case _PoseStep.right:
+        satisfied = yaw > 15;
+        break;
+      case _PoseStep.up:
+        satisfied = pitch < -10;
+        break;
+    }
+
+    if (satisfied) {
+      _poseIndex++;
+      final progress =
+          (_poseIndex / _poseSequence.length).clamp(0.0, 1.0).toDouble();
+      if (mounted) {
+        setState(() {
+          _poseProgress = progress;
+          _poseMessage = _poseIndex >= _poseSequence.length
+              ? 'Hold still... capturing'
+              : _poseInstructionForStep(_poseSequence[_poseIndex]);
+        });
+      }
+      return true;
+    } else {
+      if (mounted) {
+        setState(() {
+          _poseMessage = _poseInstructionForStep(step);
+        });
+      }
+    }
+    return false;
+  }
+
+  Uint8List _convertToNv21(CameraImage image) {
+    final width = image.width;
+    final height = image.height;
+    final yPlane = image.planes[0];
+    final uPlane = image.planes[1];
+    final vPlane = image.planes[2];
+
+    final int ySize = width * height;
+    final int uvSize = width * height ~/ 2;
+    final Uint8List bytes = Uint8List(ySize + uvSize);
+
+    int offset = 0;
+    for (int row = 0; row < height; row++) {
+      final int rowStart = row * yPlane.bytesPerRow;
+      bytes.setRange(offset, offset + width, yPlane.bytes, rowStart);
+      offset += width;
+    }
+
+    final int chromaHeight = height ~/ 2;
+    final int chromaWidth = width ~/ 2;
+    final int uRowStride = uPlane.bytesPerRow;
+    final int vRowStride = vPlane.bytesPerRow;
+    final int uPixelStride = uPlane.bytesPerPixel ?? 1;
+    final int vPixelStride = vPlane.bytesPerPixel ?? 1;
+
+    for (int row = 0; row < chromaHeight; row++) {
+      final int uRowStart = row * uRowStride;
+      final int vRowStart = row * vRowStride;
+      for (int col = 0; col < chromaWidth; col++) {
+        final int uIndex = uRowStart + col * uPixelStride;
+        final int vIndex = vRowStart + col * vPixelStride;
+        bytes[offset++] = vPlane.bytes[vIndex];
+        bytes[offset++] = uPlane.bytes[uIndex];
+      }
+    }
+
+    return bytes;
+  }
+
+  InputImage? _cameraImageToInputImage(
+    CameraImage image,
+    CameraController controller,
+  ) {
+    InputImageFormat format;
+    Uint8List bytes;
+    int bytesPerRow;
+
+    if (Platform.isIOS) {
+      format = InputImageFormat.bgra8888;
+      bytes = image.planes.first.bytes;
+      bytesPerRow = image.planes.first.bytesPerRow;
+    } else {
+      format = InputImageFormat.nv21;
+      bytes = _convertToNv21(image);
+      bytesPerRow = image.planes.first.bytesPerRow;
+    }
+
+    final sensorOrientation = controller.description.sensorOrientation;
+    InputImageRotation? rotation =
+        InputImageRotationValue.fromRawValue(sensorOrientation) ??
+            InputImageRotation.rotation0deg;
+
+    return InputImage.fromBytes(
+      bytes: bytes,
+      metadata: InputImageMetadata(
+        size: Size(image.width.toDouble(), image.height.toDouble()),
+        rotation: rotation,
+        format: format,
+        bytesPerRow: bytesPerRow,
+      ),
+    );
   }
 
   Future<void> _initCamera() async {
@@ -148,11 +408,11 @@ class _FaceRegisterState extends State<FaceRegister> {
 
     try {
       if (kDebugMode) {
-        print('FaceRegister: Initializing camera...');
+        debugPrint('FaceRegister: Initializing camera...');
       }
       final cams = await availableCameras();
       if (kDebugMode) {
-        print('FaceRegister: Available cameras: ${cams.length}');
+        debugPrint('FaceRegister: Available cameras: ${cams.length}');
       }
       if (cams.isEmpty) {
         throw CameraException('No cameras', 'No cameras available on device');
@@ -163,7 +423,7 @@ class _FaceRegisterState extends State<FaceRegister> {
         orElse: () => cams.first,
       );
       if (kDebugMode) {
-        print(
+        debugPrint(
           'FaceRegister: Selected camera: ${front.name} (${front.lensDirection})',
         );
       }
@@ -172,7 +432,7 @@ class _FaceRegisterState extends State<FaceRegister> {
         front,
         ResolutionPreset.medium,
         enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.jpeg,
+        imageFormatGroup: ImageFormatGroup.yuv420,
       );
 
       try {
@@ -180,14 +440,14 @@ class _FaceRegisterState extends State<FaceRegister> {
       } on CameraException catch (e) {
         // Common case: camera still "in use" right after coming back
         if (kDebugMode) {
-          print('FaceRegister: CameraException on initialize: ${e.code} / $e');
+          debugPrint('FaceRegister: CameraException on initialize: ${e.code} / $e');
         }
         // Simple retry after a short delay
         if (e.code == 'CameraAccess' || e.code == 'CameraInUse') {
           await Future.delayed(const Duration(milliseconds: 300));
           if (!mounted) return;
           if (kDebugMode) {
-            print('FaceRegister: retrying camera initialize...');
+            debugPrint('FaceRegister: retrying camera initialize...');
           }
           await ctrl.initialize();
         } else {
@@ -200,11 +460,11 @@ class _FaceRegisterState extends State<FaceRegister> {
       try {
         await ctrl.lockCaptureOrientation();
         if (kDebugMode) {
-          print('FaceRegister: Camera initialized and locked');
+          debugPrint('FaceRegister: Camera initialized and locked');
         }
       } catch (e) {
         if (kDebugMode) {
-          print('FaceRegister: Warning: Could not lock orientation: $e');
+          debugPrint('FaceRegister: Warning: Could not lock orientation: $e');
         }
       }
 
@@ -212,11 +472,14 @@ class _FaceRegisterState extends State<FaceRegister> {
       setState(() {
         _cam = ctrl;
         _busy = false;
+        _resetPoseTracking(notify: false);
+        _poseMessage = _poseInstructionForStep(_poseSequence.first);
       });
+      await _startPoseGuidanceStream();
     } catch (e) {
       if (!mounted) return;
       if (kDebugMode) {
-        print('FaceRegister: _initCamera error: $e');
+        debugPrint('FaceRegister: _initCamera error: $e');
       }
       ScaffoldMessenger.of(
         context,
@@ -251,20 +514,20 @@ class _FaceRegisterState extends State<FaceRegister> {
         if (decodedBody['error'] == 0) {
             _login();
         } else {
-          print('error is 1, error in daving the embedding');
+          debugPrint('error is 1, error in daving the embedding');
         }
         if (kDebugMode) {
-          print('✅ Embedding saved: ${resp.body}');
+          debugPrint('✅ Embedding saved: ${resp.body}');
         }
       } else {
         if (kDebugMode) {
-          print('❌ Server error ${resp.statusCode}: ${resp.body}');
+          debugPrint('❌ Server error ${resp.statusCode}: ${resp.body}');
         }
         throw Exception('Server ${resp.statusCode}');
       }
     } catch (e) {
       if (kDebugMode) {
-        print('❌ Network error: $e');
+        debugPrint('❌ Network error: $e');
       }
       rethrow;
     }
@@ -279,12 +542,15 @@ class _FaceRegisterState extends State<FaceRegister> {
       _uprightBytes = null;
       _imgW = 0;
       _imgH = 0;
+      _poseIndex = 0;
+      _poseProgress = 0;
+      _poseMessage = 'Align your face inside the circle';
     });
   }
 
-  Future<void> _re_capture() async {
+  Future<void> _recapture() async {
     if (kDebugMode) {
-      print('FaceRegister: re-capture');
+      debugPrint('FaceRegister: re-capture');
     }
     if (!mounted) return;
     setState(() {
@@ -305,7 +571,7 @@ class _FaceRegisterState extends State<FaceRegister> {
 
   Future<void> _login() async {
     if (kDebugMode) {
-      print('FaceRegister: login btn clicked');
+      debugPrint('FaceRegister: login btn clicked');
     }
 
     // 1️⃣ clean camera + interpreter before navigation
@@ -337,6 +603,8 @@ class _FaceRegisterState extends State<FaceRegister> {
       if (!_cam!.value.isInitialized) {
         throw CameraException('Not initialized', 'Camera is not initialized');
       }
+
+      await _stopPoseGuidanceStream();
 
       final file = await _cam!.takePicture();
       final f = File(file.path);
@@ -403,9 +671,10 @@ class _FaceRegisterState extends State<FaceRegister> {
   @override
   void dispose() {
     if (kDebugMode) {
-      print('FaceRegister: dispose');
+      debugPrint('FaceRegister: dispose');
     }
 
+    _stopPoseGuidanceStream();
     _detector.close();
     _cam?.dispose();
     _cam = null;
@@ -435,7 +704,7 @@ class _FaceRegisterState extends State<FaceRegister> {
               children: [
                 if (_lastImage != null) ...[
                   ElevatedButton.icon(
-                    onPressed: _busy ? null : _re_capture,
+                    onPressed: _busy ? null : _recapture,
                     icon: const Icon(Icons.camera_alt),
                     label: Text(_busy ? 'Working…' : 'Re-Capture'),
                   ),
@@ -464,13 +733,65 @@ class _FaceRegisterState extends State<FaceRegister> {
           const SizedBox(height: 8),
           if (_lastImage == null)
             Expanded(
-              child: FittedBox(
-                fit: BoxFit.cover,
-                child: SizedBox(
-                  width: cam.value.previewSize!.height,
-                  height: cam.value.previewSize!.width,
-                  child: CameraPreview(cam),
-                ),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final previewWidth = cam.value.previewSize!.height;
+                  final previewHeight = cam.value.previewSize!.width;
+                  final overlaySize =
+                      math.min(constraints.maxWidth, constraints.maxHeight) *
+                          0.8;
+                  return Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      Positioned.fill(
+                        child: FittedBox(
+                          fit: BoxFit.cover,
+                          child: SizedBox(
+                            width: previewWidth,
+                            height: previewHeight,
+                            child: CameraPreview(cam),
+                          ),
+                        ),
+                      ),
+                      SizedBox(
+                        width: overlaySize,
+                        height: overlaySize,
+                        child: IgnorePointer(
+                          child: CustomPaint(
+                            painter: _FacePoseRingPainter(_poseProgress),
+                          ),
+                        ),
+                      ),
+                      Positioned(
+                        bottom: 32,
+                        left: 16,
+                        right: 16,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              'Move your head slowly to complete the circle.',
+                              textAlign: TextAlign.center,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .titleMedium
+                                  ?.copyWith(color: Colors.white),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              _poseMessage,
+                              textAlign: TextAlign.center,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodyMedium
+                                  ?.copyWith(color: Colors.white70),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  );
+                },
               ),
             ),
           const SizedBox(height: 8),
@@ -538,3 +859,4 @@ class _FaceRegisterState extends State<FaceRegister> {
     );
   }
 }
+

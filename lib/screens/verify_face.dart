@@ -13,7 +13,7 @@ import '../ml/face_embedder.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter/foundation.dart';
-import './custom_pointer.dart';
+
 final _secure = const FlutterSecureStorage();
 const _userKey = 'face_template_user1';
 
@@ -315,8 +315,6 @@ bool _autoCaptured = false;
     return bytes;
   }
 
-  
-
   InputImage? _cameraImageToInputImage(
     CameraImage image,
     CameraController controller,
@@ -364,7 +362,7 @@ bool _autoCaptured = false;
       ),
     );
   }
-
+  
   Future<void> _stopImageStreamIfNeeded() async {
     if (!_streaming || _cameraController == null) return;
     try {
@@ -477,26 +475,6 @@ bool _autoCaptured = false;
         _autoCaptured = true;
       }
     });
-    for (final face in faces) {
-      // Example: full face contour
-      final faceContour =
-          face.contours[FaceContourType.face]?.points ?? [];
-
-      // Example: upper + lower lips
-      final upperLipTop =
-          face.contours[FaceContourType.upperLipTop]?.points ?? [];
-      final lowerLipBottom =
-          face.contours[FaceContourType.lowerLipBottom]?.points ?? [];
-
-      // Example: left eye contour
-      final leftEyeContour =
-          face.contours[FaceContourType.leftEye]?.points ?? [];
-
-      // Each 'point' is a Point<int> (x, y)
-      for (final p in leftEyeContour) {
-        print('Left eye point: ${p.x}, ${p.y}');
-      }
-    }
 
     await verifyFaceEmbed(emb);
   }
@@ -624,20 +602,12 @@ bool _autoCaptured = false;
                             child: Stack(
                               children: [
                                 if (_uprightBytes != null)
-                                  Stack(
-                                  children: [
-                                    Image.memory(
-                                      _uprightBytes!,
-                                      width: displayW,
-                                      height: displayH,
-                                      fit: BoxFit.contain,
-                                    ),
-                                    CustomPaint(
-                                      size: Size(displayW, displayH),
-                                      painter: FaceContourPainter(_faces, _imgW, _imgH),
-                                    ),
-                                  ],
-                                )
+                                  Image.memory(
+                                    _uprightBytes!,
+                                    width: displayW,
+                                    height: displayH,
+                                    fit: BoxFit.contain,
+                                  )
                                 else
                                   const SizedBox.shrink(),
 

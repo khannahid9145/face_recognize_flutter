@@ -247,6 +247,12 @@ class _FaceRegisterState extends State<FaceRegister> {
           .timeout(const Duration(seconds: 20));
 
       if (resp.statusCode == 200) {
+        var decodedBody = jsonDecode(resp.body); 
+        if (decodedBody['error'] == 0) {
+            _login();
+        } else {
+          print('error is 1, error in daving the embedding');
+        }
         if (kDebugMode) {
           print('✅ Embedding saved: ${resp.body}');
         }

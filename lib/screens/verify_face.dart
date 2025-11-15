@@ -1,9 +1,9 @@
 // lib/face_first_page.dart
 import 'dart:io';
-import 'dart:typed_data';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:image/image.dart' as img;
@@ -16,6 +16,13 @@ import 'package:flutter/foundation.dart';
 
 final _secure = const FlutterSecureStorage();
 const _userKey = 'face_template_user1';
+
+const Map<DeviceOrientation, int> _orientationToDegrees = {
+  DeviceOrientation.portraitUp: 0,
+  DeviceOrientation.landscapeLeft: 90,
+  DeviceOrientation.portraitDown: 180,
+  DeviceOrientation.landscapeRight: 270,
+};
 
 img.Image _cropToModelInput(img.Image full, Rect bb, {int size = 112}) {
   final x = bb.left.floor().clamp(0, math.max(0, full.width - 1));
@@ -48,9 +55,11 @@ class _VerifyFaceState extends State<VerifyFace> {
   List<Face> _faces = [];
   int _imgW = 0, _imgH = 0;
   FaceEmbedder? _embedder;
-  Float32List? _embedding;
   Float32List? _storedEmbedding;
   Uint8List? _uprightBytes;
+bool _streaming = false;
+bool _processingFrame = false;
+bool _autoCaptured = false;
 
   final FaceDetector _detector = FaceDetector(
     options: FaceDetectorOptions(
@@ -199,7 +208,7 @@ class _VerifyFaceState extends State<VerifyFace> {
         front,
         ResolutionPreset.medium,
         enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.jpeg,
+        imageFormatGroup: ImageFormatGroup.yuv420,
       );
 
       // Wait for controller to initialize
@@ -231,6 +240,7 @@ class _VerifyFaceState extends State<VerifyFace> {
         _cameraController = ctrl;
         _busy = false;
       });
+      _startAutoCaptureStream();
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -248,17 +258,225 @@ class _VerifyFaceState extends State<VerifyFace> {
     setState(() {
       _lastImage = null;
       _faces = [];
-      _embedding = null;
       _storedEmbedding = null; // clear in-memory embedding
       _uprightBytes = null;
       _faceAuthorize = false;
       _imgW = 0;
       _imgH = 0;
+      _autoCaptured = false;
+      _streaming = false;
+      _processingFrame = false;
     });
   }
 
   Future<void> _reCapture() async {
+    await _stopImageStreamIfNeeded();
     _clearState();
+    await _startAutoCaptureStream();
+  }
+
+  Uint8List _convertToNv21(CameraImage image) {
+    final width = image.width;
+    final height = image.height;
+    final yPlane = image.planes[0];
+    final uPlane = image.planes[1];
+    final vPlane = image.planes[2];
+
+    final int ySize = width * height;
+    final int uvSize = width * height ~/ 2;
+    final Uint8List bytes = Uint8List(ySize + uvSize);
+
+    // Copy Y
+    int offset = 0;
+    for (int row = 0; row < height; row++) {
+      final int rowStart = row * yPlane.bytesPerRow;
+      bytes.setRange(offset, offset + width, yPlane.bytes, rowStart);
+      offset += width;
+    }
+
+    final int chromaHeight = height ~/ 2;
+    final int chromaWidth = width ~/ 2;
+    final int uRowStride = uPlane.bytesPerRow;
+    final int vRowStride = vPlane.bytesPerRow;
+    final int uPixelStride = uPlane.bytesPerPixel ?? 1;
+    final int vPixelStride = vPlane.bytesPerPixel ?? 1;
+
+    for (int row = 0; row < chromaHeight; row++) {
+      final int uRowStart = row * uRowStride;
+      final int vRowStart = row * vRowStride;
+      for (int col = 0; col < chromaWidth; col++) {
+        final int uIndex = uRowStart + col * uPixelStride;
+        final int vIndex = vRowStart + col * vPixelStride;
+        bytes[offset++] = vPlane.bytes[vIndex];
+        bytes[offset++] = uPlane.bytes[uIndex];
+      }
+    }
+
+    return bytes;
+  }
+
+  InputImage? _cameraImageToInputImage(
+    CameraImage image,
+    CameraController controller,
+  ) {
+    InputImageFormat format;
+    Uint8List bytes;
+    int bytesPerRow;
+
+    if (Platform.isIOS) {
+      format = InputImageFormat.bgra8888;
+      bytes = image.planes.first.bytes;
+      bytesPerRow = image.planes.first.bytesPerRow;
+    } else {
+      format = InputImageFormat.nv21;
+      bytes = _convertToNv21(image);
+      bytesPerRow = image.planes.first.bytesPerRow;
+    }
+
+    final sensorOrientation = controller.description.sensorOrientation;
+    InputImageRotation? rotation;
+    if (Platform.isIOS) {
+      rotation = InputImageRotationValue.fromRawValue(sensorOrientation);
+    } else {
+      var rotationCompensation =
+          _orientationToDegrees[controller.value.deviceOrientation] ?? 0;
+      if (controller.description.lensDirection == CameraLensDirection.front) {
+        rotation = InputImageRotationValue.fromRawValue(
+          (rotationCompensation + sensorOrientation) % 360,
+        );
+      } else {
+        rotation = InputImageRotationValue.fromRawValue(
+          (sensorOrientation - rotationCompensation + 360) % 360,
+        );
+      }
+    }
+    rotation ??= InputImageRotation.rotation0deg;
+
+    return InputImage.fromBytes(
+      bytes: bytes,
+      metadata: InputImageMetadata(
+        size: Size(image.width.toDouble(), image.height.toDouble()),
+        rotation: rotation,
+        format: format,
+        bytesPerRow: bytesPerRow,
+      ),
+    );
+  }
+  
+  Future<void> _stopImageStreamIfNeeded() async {
+    if (!_streaming || _cameraController == null) return;
+    try {
+      await _cameraController!.stopImageStream();
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('stopImageStream error: $e');
+      }
+    } finally {
+      _streaming = false;
+      _processingFrame = false;
+    }
+  }
+
+  Future<void> _startAutoCaptureStream() async {
+    final controller = _cameraController;
+    if (controller == null || _streaming) return;
+
+    try {
+      _streaming = true;
+      await controller.startImageStream((CameraImage image) async {
+        if (_processingFrame || _autoCaptured || _busy) return;
+        _processingFrame = true;
+
+        try {
+          final inputImage = _cameraImageToInputImage(image, controller);
+          if (inputImage == null) return;
+
+          final faces = await _detector.processImage(inputImage);
+          if (faces.isEmpty) return;
+
+          _autoCaptured = true;
+          await _stopImageStreamIfNeeded();
+
+          if (!mounted) return;
+          setState(() => _busy = true);
+          try {
+            final file = await controller.takePicture();
+            await _processCapturedFile(File(file.path), fromStream: true);
+          } finally {
+            if (mounted) {
+              setState(() => _busy = false);
+            }
+          }
+        } catch (e) {
+          debugPrint('Auto-capture error: $e');
+          _autoCaptured = false;
+        } finally {
+          _processingFrame = false;
+        }
+      });
+    } catch (e) {
+      _streaming = false;
+      debugPrint('Failed to start auto stream: $e');
+    }
+  }
+
+  Future<void> _processCapturedFile(
+    File f, {
+    bool fromStream = false,
+  }) async {
+    final input = InputImage.fromFile(f);
+    final faces = await _detector.processImage(input);
+    if (faces.isEmpty) {
+      if (!mounted) return;
+      setState(() {
+        _lastImage = null;
+        _faces = const [];
+        _uprightBytes = null;
+        if (fromStream) {
+          _autoCaptured = false;
+        }
+      });
+      if (fromStream) {
+        await _startAutoCaptureStream();
+      }
+      return;
+    }
+
+    final bytes = await f.readAsBytes();
+    final decodedRaw = img.decodeImage(bytes);
+    if (decodedRaw == null) throw Exception('Failed to decode image');
+    final upright = img.bakeOrientation(decodedRaw);
+
+    _imgW = upright.width;
+    _imgH = upright.height;
+    _uprightBytes = Uint8List.fromList(img.encodeJpg(upright, quality: 95));
+
+    final target = faces.reduce(
+      (a, b) =>
+          a.boundingBox.width * a.boundingBox.height >
+                  b.boundingBox.width * b.boundingBox.height
+              ? a
+              : b,
+    );
+
+    final face112 = _cropToModelInput(upright, target.boundingBox);
+
+    if (_embedder == null) {
+      throw Exception('Embedder not initialized');
+    }
+    final emb = _embedder!.run(face112);
+    await _saveEnrollment(emb);
+
+    if (!mounted) return;
+    setState(() {
+      _lastImage = f;
+      _faces = faces;
+      if (fromStream) {
+        _autoCaptured = true;
+      }
+    });
+
+    await verifyFaceEmbed(emb);
   }
 
   Future<void> _captureAndDetect() async {
@@ -270,63 +488,13 @@ class _VerifyFaceState extends State<VerifyFace> {
         throw CameraException('Not initialized', 'Camera is not initialized');
       }
 
+      await _stopImageStreamIfNeeded();
       final file = await _cameraController!.takePicture();
       final f = File(file.path);
       if (!f.existsSync()) {
         throw Exception('Image file not found: ${file.path}');
       }
-
-      // 1) Detect faces from file (ML Kit reads EXIF and returns upright-space boxes)
-      final input = InputImage.fromFile(f);
-      final faces = await _detector.processImage(input);
-      if (faces.isEmpty) {
-        if (!mounted) return;
-        setState(() {
-          _lastImage = null;
-          _faces = const [];
-          _uprightBytes = null;
-        });
-        return;
-      }
-
-      // 2) Decode and BAKE orientation to get upright pixels for math & display
-      final bytes = await f.readAsBytes();
-      final decodedRaw = img.decodeImage(bytes);
-      if (decodedRaw == null) throw Exception('Failed to decode image');
-      final upright = img.bakeOrientation(decodedRaw);
-
-      // Keep these for scaling + showing
-      _imgW = upright.width;
-      _imgH = upright.height;
-      _uprightBytes = Uint8List.fromList(img.encodeJpg(upright, quality: 95));
-
-      // 3) Pick largest face and crop FROM THE UPRIGHT IMAGE
-      final target = faces.reduce(
-        (a, b) =>
-            a.boundingBox.width * a.boundingBox.height >
-                    b.boundingBox.width * b.boundingBox.height
-                ? a
-                : b,
-      );
-
-      final face112 = _cropToModelInput(upright, target.boundingBox);
-
-      // 4) Embed and store
-      if (_embedder == null) {
-        throw Exception('Embedder not initialized');
-      }
-      final emb = _embedder!.run(face112);
-      await _saveEnrollment(emb);
-
-      if (!mounted) return;
-      setState(() {
-        _embedding = emb;
-        _lastImage = f;
-        _faces = faces; // boxes are in upright-space
-      });
-      
-
-      await verifyFaceEmbed(emb);
+      await _processCapturedFile(f);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -348,7 +516,6 @@ class _VerifyFaceState extends State<VerifyFace> {
     // clear UI state (no setState here – widget is being disposed)
     _lastImage = null;
     _faces = [];
-    _embedding = null;
     _storedEmbedding = null;
     _uprightBytes = null;
     _faceAuthorize = false;
@@ -364,11 +531,10 @@ class _VerifyFaceState extends State<VerifyFace> {
   Widget build(BuildContext context) {
     final cam = _cameraController;
 
-    return WillPopScope(
-      onWillPop: () async {
-        // clear everything when user goes back
+    return PopScope(
+      onPopInvokedWithResult: (didPop, result) async {
+        await _stopImageStreamIfNeeded();
         _clearState();
-        return true;
       },
       child: Scaffold(
         appBar: AppBar(title: const Text('Authorize Face')),

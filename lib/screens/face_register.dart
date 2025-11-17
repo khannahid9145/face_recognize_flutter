@@ -41,9 +41,10 @@ class _FacePoseRingPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final center = size.center(Offset.zero);
     final radius = math.min(size.width, size.height) / 2 - 12;
-    final tickPaint = Paint()
-      ..strokeCap = StrokeCap.round
-      ..strokeWidth = 3;
+    final tickPaint =
+        Paint()
+          ..strokeCap = StrokeCap.round
+          ..strokeWidth = 3;
     const tickCount = 60;
     final activeTicks = (tickCount * progress.clamp(0, 1)).round();
 
@@ -61,10 +62,11 @@ class _FacePoseRingPainter extends CustomPainter {
       canvas.drawLine(start, end, tickPaint);
     }
 
-    final borderPaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2
-      ..color = Colors.white54;
+    final borderPaint =
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2
+          ..color = Colors.white54;
     canvas.drawCircle(center, radius, borderPaint);
   }
 
@@ -181,9 +183,18 @@ class _FaceRegisterState extends State<FaceRegister> {
         debugPrint('FaceRegister: _cleanUp');
       }
       await _stopPoseGuidanceStream();
-      if (_cam != null) {
-        await _cam!.dispose();
-        _cam = null;
+      final cam = _cam;
+      if (cam != null) {
+        if (mounted) {
+          setState(() {
+            _cam = null;
+            _lastImage = null;
+          });
+        } else {
+          _cam = null;
+          _lastImage = null;
+        }
+        await cam.dispose();
         if (kDebugMode) {
           debugPrint('FaceRegister: Camera disposed');
         }
@@ -311,9 +322,10 @@ class _FaceRegisterState extends State<FaceRegister> {
       if (mounted) {
         setState(() {
           _poseProgress = progress;
-          _poseMessage = _poseIndex >= _poseSequence.length
-              ? 'Hold still... capturing'
-              : _poseInstructionForStep(_poseSequence[_poseIndex]);
+          _poseMessage =
+              _poseIndex >= _poseSequence.length
+                  ? 'Hold still... capturing'
+                  : _poseInstructionForStep(_poseSequence[_poseIndex]);
         });
       }
       return true;
@@ -387,7 +399,7 @@ class _FaceRegisterState extends State<FaceRegister> {
     final sensorOrientation = controller.description.sensorOrientation;
     InputImageRotation? rotation =
         InputImageRotationValue.fromRawValue(sensorOrientation) ??
-            InputImageRotation.rotation0deg;
+        InputImageRotation.rotation0deg;
 
     return InputImage.fromBytes(
       bytes: bytes,
@@ -440,7 +452,9 @@ class _FaceRegisterState extends State<FaceRegister> {
       } on CameraException catch (e) {
         // Common case: camera still "in use" right after coming back
         if (kDebugMode) {
-          debugPrint('FaceRegister: CameraException on initialize: ${e.code} / $e');
+          debugPrint(
+            'FaceRegister: CameraException on initialize: ${e.code} / $e',
+          );
         }
         // Simple retry after a short delay
         if (e.code == 'CameraAccess' || e.code == 'CameraInUse') {
@@ -510,9 +524,12 @@ class _FaceRegisterState extends State<FaceRegister> {
           .timeout(const Duration(seconds: 20));
 
       if (resp.statusCode == 200) {
-        var decodedBody = jsonDecode(resp.body); 
+        // print
+        var decodedBody = jsonDecode(resp.body);
+
         if (decodedBody['error'] == 0) {
-            _login();
+          // _login();
+          debugPrint('Image has been saved successfully');
         } else {
           debugPrint('error is 1, error in daving the embedding');
         }
@@ -656,6 +673,7 @@ class _FaceRegisterState extends State<FaceRegister> {
         _lastImage = f;
         _faces = faces;
       });
+      _saveImage();
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -689,9 +707,7 @@ class _FaceRegisterState extends State<FaceRegister> {
     final cam = _cam;
 
     if (cam == null || !cam.value.isInitialized) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
-      );
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
     return Scaffold(
@@ -701,33 +717,34 @@ class _FaceRegisterState extends State<FaceRegister> {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16.0),
             child: Row(
-              children: [
-                if (_lastImage != null) ...[
-                  ElevatedButton.icon(
-                    onPressed: _busy ? null : _recapture,
-                    icon: const Icon(Icons.camera_alt),
-                    label: Text(_busy ? 'Working…' : 'Re-Capture'),
-                  ),
-                  const SizedBox(width: 8),
-                  ElevatedButton.icon(
-                    onPressed: _busy ? null : _saveImage,
-                    icon: const Icon(Icons.save),
-                    label: Text(_busy ? 'Saving…' : 'Register Face'),
-                  ),
-                ] else ...[
-                  ElevatedButton.icon(
-                    onPressed: _busy ? null : _captureAndDetect,
-                    icon: const Icon(Icons.camera_alt),
-                    label: Text(_busy ? 'Working…' : 'Capture'),
-                  ),
-                ],
-                const SizedBox(width: 8),
-                ElevatedButton.icon(
-                  onPressed: _busy ? null : _login,
-                  icon: const Icon(Icons.login),
-                  label: Text(_busy ? 'Processing…' : 'Login'),
-                ),
-              ],
+              // children: [
+              //   if (_lastImage != null) ...[
+              //     ElevatedButton.icon(
+              //       onPressed: _busy ? null : _recapture,
+              //       icon: const Icon(Icons.camera_alt),
+              //       label: Text(_busy ? 'Working…' : 'Re-Capture'),
+              //     ),
+              //     const SizedBox(width: 8),
+              //     ElevatedButton.icon(
+              //       onPressed: _busy ? null : _saveImage,
+              //       icon: const Icon(Icons.save),
+              //       label: Text(_busy ? 'Saving…' : 'Register Face'),
+              //     ),
+              //   ] else ...[
+              //     ElevatedButton.icon(
+              //       onPressed: _busy ? null : _captureAndDetect,
+              //       icon: const Icon(Icons.camera_alt),
+              //       label: Text(_busy ? 'Working…' : 'Capture'),
+              //     ),
+              //   ],
+              //   const SizedBox(width: 8),
+              //   ElevatedButton.icon(
+              //     onPressed: _busy ? null : _login,
+              //     icon: const Icon(Icons.login),
+              //     label: Text(_busy ? 'Processing…' : 'Login'),
+              //   ),
+              // ],
+
             ),
           ),
           const SizedBox(height: 8),
@@ -739,57 +756,63 @@ class _FaceRegisterState extends State<FaceRegister> {
                   final previewHeight = cam.value.previewSize!.width;
                   final overlaySize =
                       math.min(constraints.maxWidth, constraints.maxHeight) *
-                          0.8;
-                  return Stack(
-                    alignment: Alignment.center,
-                    children: [
-                      Positioned.fill(
-                        child: FittedBox(
-                          fit: BoxFit.cover,
-                          child: SizedBox(
-                            width: previewWidth,
-                            height: previewHeight,
-                            child: CameraPreview(cam),
+                      0.8;
+                  return Container(
+                    color: Colors.transparent, // Fills all remaining space
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        Positioned.fill(
+                          child: Container(color: Colors.transparent),
+                        ),
+                        SizedBox(
+                          width: overlaySize,
+                          height: overlaySize,
+                          child: ClipOval(
+                            child: FittedBox(
+                              fit: BoxFit.cover,
+                              child: SizedBox(
+                                width: previewWidth,
+                                height: previewHeight,
+                                child: CameraPreview(cam),
+                              ),
+                            ),
                           ),
                         ),
-                      ),
-                      SizedBox(
-                        width: overlaySize,
-                        height: overlaySize,
-                        child: IgnorePointer(
-                          child: CustomPaint(
-                            painter: _FacePoseRingPainter(_poseProgress),
+                        SizedBox(
+                          width: overlaySize,
+                          height: overlaySize,
+                          child: IgnorePointer(
+                            child: CustomPaint(
+                              painter: _FacePoseRingPainter(_poseProgress),
+                            ),
                           ),
                         ),
-                      ),
-                      Positioned(
-                        bottom: 32,
-                        left: 16,
-                        right: 16,
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              'Move your head slowly to complete the circle.',
-                              textAlign: TextAlign.center,
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .titleMedium
-                                  ?.copyWith(color: Colors.white),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              _poseMessage,
-                              textAlign: TextAlign.center,
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .bodyMedium
-                                  ?.copyWith(color: Colors.white70),
-                            ),
-                          ],
+                        Positioned(
+                          bottom: 32,
+                          left: 16,
+                          right: 16,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                'Move your head slowly to complete the circle.',
+                                textAlign: TextAlign.center,
+                                style: Theme.of(context).textTheme.titleMedium
+                                    ?.copyWith(color: Colors.black),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                _poseMessage,
+                                textAlign: TextAlign.center,
+                                style: Theme.of(context).textTheme.bodyMedium
+                                    ?.copyWith(color: Colors.black87),
+                              ),
+                            ],
+                          ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   );
                 },
               ),
@@ -808,46 +831,68 @@ class _FaceRegisterState extends State<FaceRegister> {
                   return SingleChildScrollView(
                     child: Column(
                       children: [
-                        SizedBox(
-                          width: displayW,
-                          height: displayH,
-                          child: Stack(
-                            children: [
-                              if (_uprightBytes != null)
-                                Image.memory(
-                                  _uprightBytes!,
-                                  width: displayW,
-                                  height: displayH,
-                                  fit: BoxFit.contain,
-                                )
-                              else
-                                const SizedBox.shrink(),
-                              for (final face in _faces)
-                                Positioned(
-                                  left: face.boundingBox.left * sx,
-                                  top: face.boundingBox.top * sy,
-                                  child: Container(
-                                    width: face.boundingBox.width * sx,
-                                    height: face.boundingBox.height * sy,
-                                    decoration: BoxDecoration(
-                                      border: Border.all(width: 2),
+                        AlertDialog(
+                          title: const Text('Image Register Successfully'),
+                          content: const Text(
+                            'Image registration is successful! Please click Login. ',
+                          ),
+                          actions: <Widget>[
+                            TextButton(
+                              onPressed: () => Navigator.pop(context, 'Cancel'),
+                              child: const Text('Cancel'),
+                            ),
+                            TextButton(
+                              onPressed:
+                                  () => Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (context) => const VerifyFace(),
                                     ),
                                   ),
-                                ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                          child: Align(
-                            alignment: Alignment.centerLeft,
-                            child: Text(
-                              'Detected faces: ${_faces.length}',
-                              style: Theme.of(context).textTheme.titleMedium,
+                              child: const Text('Login'),
                             ),
-                          ),
+                          ],
                         ),
+                        // SizedBox(
+                        //   width: displayW,
+                        //   height: displayH,
+                        //   child: Stack(
+                        //     children: [
+                        //       if (_uprightBytes != null)
+                        //         Image.memory(
+                        //           _uprightBytes!,
+                        //           width: displayW,
+                        //           height: displayH,
+                        //           fit: BoxFit.contain,
+                        //         )
+                        //       else
+                        //         const SizedBox.shrink(),
+                        //       for (final face in _faces)
+                        //         Positioned(
+                        //           left: face.boundingBox.left * sx,
+                        //           top: face.boundingBox.top * sy,
+                        //           child: Container(
+                        //             width: face.boundingBox.width * sx,
+                        //             height: face.boundingBox.height * sy,
+                        //             decoration: BoxDecoration(
+                        //               border: Border.all(width: 2),
+                        //             ),
+                        //           ),
+                        //         ),
+                        //     ],
+                        //   ),
+                        // ),
+                        // const SizedBox(height: 8),
+                        // Padding(
+                        //   padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                        //   child: Align(
+                        //     alignment: Alignment.centerLeft,
+                        //     child: Text(
+                        //       'Detected faces: ${_faces.length}',
+                        //       style: Theme.of(context).textTheme.titleMedium,
+                        //     ),
+                        //   ),
+                        // ),
                       ],
                     ),
                   );
@@ -859,4 +904,3 @@ class _FaceRegisterState extends State<FaceRegister> {
     );
   }
 }
-
